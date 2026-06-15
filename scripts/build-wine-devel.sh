@@ -130,6 +130,11 @@ else
     echo "  ⚠ steamwebhelper.exe entry not found in process.c — was 0005 applied? skipping Battle.net hack"
 fi
 
+echo "=== Diagnostic: did 0005 actually land in process.c? ==="
+grep -n "steamwebhelper\|hack_append_command_line\|CROSSOVER HACK\|no.sandbox" \
+    "${WINE_SRC}/dlls/kernelbase/process.c" 2>/dev/null | head -20 \
+    || echo "  (nothing matched — 0005 may not have applied functionally)"
+
 echo "=== Applying dwproton backport patches (gi-timeout excluded) ==="
 if [[ -d "${DWPROTON_BASE}" ]]; then
     for subdir in "${DWPROTON_BASE}/0001-em-backports" "${DWPROTON_BASE}/0002-misc-dw"; do
@@ -379,6 +384,29 @@ for gst_dir in \
   cp "$gst_dir"/*.dylib "${WINE_LIB}/gstreamer-1.0/" 2>/dev/null || true
   echo "  ✓ GStreamer plugins from ${gst_dir}"
 done
+
+echo "=== Bundle GStreamer core libs ==="
+for gst_core in gstreamer-1.0 gstbase-1.0 gstaudio-1.0 gstvideo-1.0 gstpbutils-1.0 gsttag-1.0; do
+  for candidate in \
+    "${BREW_PREFIX}/lib/lib${gst_core}.0.dylib" \
+    "/usr/local/lib/lib${gst_core}.0.dylib"; do
+    [[ -f "$candidate" ]] && { bundle_dep "$candidate"; break; }
+  done
+done
+
+echo "=== Rewrite Homebrew paths in GStreamer plugins ==="
+find "${WINE_LIB}/gstreamer-1.0" -name "*.dylib" | while read -r plugin; do
+  while IFS= read -r dep; do
+    [[ "$dep" =~ ^(/usr/local/|/opt/homebrew/) ]] || continue
+    depname=$(basename "$dep")
+    if [[ -f "${WINE_LIB}/gstreamer-1.0/${depname}" ]]; then
+      install_name_tool -change "$dep" "@loader_path/${depname}" "$plugin" 2>/dev/null
+    elif [[ -f "${WINE_LIB}/${depname}" ]]; then
+      install_name_tool -change "$dep" "@loader_path/../${depname}" "$plugin" 2>/dev/null
+    fi
+  done < <(otool -L "$plugin" 2>/dev/null | awk 'NR>1{print $1}')
+done
+echo "  ✓ GStreamer plugin paths rewritten"
 
 echo "Total dylibs bundled: $(ls -1 "${WINE_LIB}" | grep '\.dylib$' | wc -l | tr -d ' ')"
 echo "=== Critical lib check ==="
