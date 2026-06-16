@@ -216,10 +216,6 @@ fi
 
 echo ""
 echo "=== Verify 0006 WineMetalView landed (critical) ==="
-# WineMetalView is the surface-attachment fix for popup/child windows that
-# was the actual root cause identified in the earlier debugging session.
-# This count has been 9 consistently on both the CrossOver source and
-# vanilla wine-11.11, so it's treated as the load-bearing check.
 METAL_VIEW=$(grep -c "WineMetalView" \
     "${WINE_SRC}/dlls/winemac.drv/cocoa_window.m" 2>/dev/null || echo "0")
 if [[ "$METAL_VIEW" -gt 0 ]]; then
@@ -231,13 +227,6 @@ fi
 
 echo ""
 echo "=== Diagnostic: winemetal module (from 0017) — informational only ==="
-# 0017-winemetal-new-stub.diff reported as applied, but its exact output
-# layout on vanilla wine-11.11 hasn't been confirmed (vanilla Wine may
-# already ship Metal-related D3D work under different paths than the
-# CrossOver tree had). NOT fatal — DXMT is built and injected later in the
-# workflow and is what actually provides the runtime winemetal.so. This
-# dump just shows what 0017 (and the other patches) actually changed, so we
-# can tighten the checks in a follow-up if anything looks off.
 echo "--- find dlls/ -iname '*metal*' ---"
 find "${WINE_SRC}/dlls" -maxdepth 2 -iname '*metal*' 2>/dev/null || true
 echo "--- git status (new/modified files, first 60) ---"
@@ -389,6 +378,23 @@ for candidate in \
 done
 [[ -n "$MOLTEN_FOUND" ]] || echo "  ✗ WARNING: libMoltenVK.dylib not found — Vulkan/Metal bridge absent"
 
+# ---------------------------------------------------------------------------
+# FIX 1 of 2: Strip ad-hoc signatures from ALL bundled dylibs BEFORE
+# running install_name_tool.
+#
+# On macOS 12+, Homebrew dylibs carry ad-hoc code signatures. When
+# install_name_tool modifies a binary it silently fails (or modifies the
+# binary but leaves the signature invalid) unless the signature is stripped
+# first. Without this, ALL install_name_tool -change calls below appear to
+# succeed but the paths stay as Cellar/opt hardcodes at runtime.
+# ---------------------------------------------------------------------------
+echo "=== Strip ad-hoc signatures from bundled dylibs (required before install_name_tool) ==="
+for dylib in "${WINE_LIB}"/*.dylib; do
+  [[ -f "$dylib" ]] || continue
+  codesign --remove-signature "$dylib" 2>/dev/null || true
+done
+echo "  ✓ signatures stripped"
+
 echo "=== Rewrite Homebrew paths in bundled dylibs ==="
 for dylib in "${WINE_LIB}"/*.dylib; do
   [[ -f "$dylib" ]] || continue
@@ -400,6 +406,13 @@ for dylib in "${WINE_LIB}"/*.dylib; do
       && echo "  ✓ $(basename $dylib) → ${depname}"
   done < <(otool -L "$dylib" 2>/dev/null | awk 'NR>1{print $1}')
 done
+
+echo "=== Re-sign bundled dylibs with ad-hoc signature ==="
+for dylib in "${WINE_LIB}"/*.dylib; do
+  [[ -f "$dylib" ]] || continue
+  codesign -s - "$dylib" 2>/dev/null || true
+done
+echo "  ✓ bundled dylibs re-signed"
 
 echo "=== Rewrite Homebrew paths in Wine binaries ==="
 find "${BUNDLE_RES}/wine/bin" -type f \( -name "wine" -o -name "wine64" -o -name "wineserver" \) \
@@ -435,13 +448,60 @@ for gst_dir in \
   echo "  ✓ GStreamer plugins from ${gst_dir}"
 done
 
-echo "=== Bundle GStreamer core libs ==="
+# ---------------------------------------------------------------------------
+# FIX 2 of 2: Strip signatures from gst plugins immediately after copying.
+# Same ad-hoc signing issue as above — must strip before install_name_tool.
+# ---------------------------------------------------------------------------
+echo "=== Strip ad-hoc signatures from GStreamer plugins ==="
+find "${WINE_LIB}/gstreamer-1.0" -name "*.dylib" | while read -r plugin; do
+  codesign --remove-signature "$plugin" 2>/dev/null || true
+done
+echo "  ✓ plugin signatures stripped"
+
+# ---------------------------------------------------------------------------
+# FIX 3 of 3: Bundle ALL GStreamer plugin dependencies, not just 6 core libs.
+#
+# The old script only called bundle_dep on 6 libs (gstreamer-1.0, gstbase-1.0,
+# gstaudio-1.0, gstvideo-1.0, gstpbutils-1.0, gsttag-1.0). But the ~80+
+# plugins copied from Homebrew's plugin dir depend on many more libs that
+# were never bundled:
+#   gst-libs:   libgstnet, libgstriff, libgstfft, libgstapp, libgstrtp,
+#               libgstrtsp, libgstsdp, libgstgl, libgstadaptivedemux,
+#               libgstcodecparsers, libgstcodecs, libgstanalytics, ...
+#   3rd-party:  libgio-2.0, libwebp, libmpg123, libFLAC, libvorbis,
+#               libspeex, libfaad, libsndfile, libaom, libass, ...
+#
+# Because these weren't in ${WINE_LIB}, the path-rewriting step's
+# `[[ -f "${WINE_LIB}/${depname}" ]]` check was false → no rewriting →
+# Cellar/opt paths left as-is → runtime "Library not loaded" failures.
+# ---------------------------------------------------------------------------
+echo "=== Bundle GStreamer core libs AND all plugin dependencies ==="
+# Core libs (same as before)
 for gst_core in gstreamer-1.0 gstbase-1.0 gstaudio-1.0 gstvideo-1.0 gstpbutils-1.0 gsttag-1.0; do
   for candidate in \
     "${BREW_PREFIX}/lib/lib${gst_core}.0.dylib" \
     "/usr/local/lib/lib${gst_core}.0.dylib"; do
     [[ -f "$candidate" ]] && { bundle_dep "$candidate"; break; }
   done
+done
+
+# NEW: scan every gst plugin and bundle_dep each of its direct deps.
+# bundle_dep is recursive, so transitive deps are also pulled in.
+# Libs not present on the CI runner (libX11, Python, etc.) are silently skipped.
+echo "  → scanning all plugin dependencies (this bundles libgio, libgstnet, libgstriff, etc.)..."
+find "${WINE_LIB}/gstreamer-1.0" -name "*.dylib" | while read -r plugin; do
+  while IFS= read -r dep; do
+    [[ "$dep" =~ ^(/usr/local/|/opt/homebrew/) ]] || continue
+    bundle_dep "$dep"
+  done < <(otool -L "$plugin" 2>/dev/null | awk 'NR>1{print $1}')
+done
+echo "  ✓ all gst plugin dependencies bundled"
+
+# Strip signatures from any newly bundled dylibs (added since the first strip pass)
+echo "=== Strip signatures from newly bundled dylibs ==="
+for dylib in "${WINE_LIB}"/*.dylib; do
+  [[ -f "$dylib" ]] || continue
+  codesign --remove-signature "$dylib" 2>/dev/null || true
 done
 
 echo "=== Rewrite Homebrew paths in GStreamer plugins ==="
@@ -454,13 +514,28 @@ find "${WINE_LIB}/gstreamer-1.0" -name "*.dylib" | while read -r plugin; do
     elif [[ -f "${WINE_LIB}/${depname}" ]]; then
       install_name_tool -change "$dep" "@loader_path/../${depname}" "$plugin" 2>/dev/null
     fi
+    # If neither path has the lib, it's an unavailable optional dep (libX11, Python, etc.)
+    # — skip silently. That plugin will be unusable but won't block others.
   done < <(otool -L "$plugin" 2>/dev/null | awk 'NR>1{print $1}')
 done
 echo "  ✓ GStreamer plugin paths rewritten"
 
+echo "=== Re-sign GStreamer plugins and all dylibs with ad-hoc signature ==="
+find "${WINE_LIB}/gstreamer-1.0" -name "*.dylib" | while read -r plugin; do
+  codesign -s - "$plugin" 2>/dev/null || true
+done
+for dylib in "${WINE_LIB}"/*.dylib; do
+  [[ -f "$dylib" ]] || continue
+  codesign -s - "$dylib" 2>/dev/null || true
+done
+echo "  ✓ re-signed"
+
 echo "Total dylibs bundled: $(ls -1 "${WINE_LIB}" | grep '\.dylib$' | wc -l | tr -d ' ')"
 echo "=== Critical lib check ==="
 ls "${WINE_LIB}" | grep -iE 'freetype|gnutls|MoltenVK|SDL' || echo "WARNING: missing critical libs"
+echo "=== GStreamer dependency check ==="
+ls "${WINE_LIB}" | grep -cE 'libgst' | xargs echo "  gst-libs bundled:"
+ls "${WINE_LIB}" | grep -E 'libgio|libvideo|libgstriff|libgstnet|libgstfft' || echo "  WARNING: some expected gst deps still missing"
 endgroup
 
 group "Package artifact"
