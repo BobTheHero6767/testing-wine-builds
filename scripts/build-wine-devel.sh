@@ -140,6 +140,31 @@ else
   echo "  ⚠ 0006 patch file not found at ${PATCH_0006}"
 fi
 
+echo "=== Fix: inject d3dmetal_client_surface ivar into WineContentView ==="
+# patch --fuzz applied the getter/setter code that USES this member but
+# dropped the hunk that DECLARES it (context mismatch vs vanilla wine-11.11).
+# Inject it as void* into the @implementation ivar block.
+COCOA_WIN="${WINE_SRC}/dlls/winemac.drv/cocoa_window.m"
+if grep -q 'd3dmetal_client_surface' "${COCOA_WIN}" 2>/dev/null \
+   && ! grep -qE '\*[[:space:]]*d3dmetal_client_surface[[:space:]]*;' "${COCOA_WIN}"; then
+  perl -i -0pe \
+    's/(\@implementation WineContentView\s*\{)/$1\n    void *d3dmetal_client_surface;/' \
+    "${COCOA_WIN}"
+  if grep -qE '\*[[:space:]]*d3dmetal_client_surface' "${COCOA_WIN}"; then
+    echo "  ✓ d3dmetal_client_surface injected into WineContentView"
+  else
+    # fallback: try the @interface block instead
+    perl -i -0pe \
+      's/(\@interface WineContentView\s*:[^\{]+\{)/$1\n    void *d3dmetal_client_surface;/' \
+      "${COCOA_WIN}"
+    grep -qE '\*[[:space:]]*d3dmetal_client_surface' "${COCOA_WIN}" \
+      && echo "  ✓ d3dmetal_client_surface injected via @interface" \
+      || echo "  ✗ FATAL: injection failed — compile will error on d3dmetal_client_surface"
+  fi
+else
+  echo "  ✓ d3dmetal_client_surface already present or unused — skipping"
+fi
+
 echo "=== Manual fix for 1001-kernelbase-CW-HACK-19610 (corrupt upstream patch) ==="
 # 1001-kernelbase-CW-HACK-19610.diff has a malformed hunk in riverfog7's repo
 # (its second hunk header claims 7 lines but only 6 are present), so
