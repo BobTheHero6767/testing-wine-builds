@@ -189,6 +189,26 @@ jobs:
           echo "dxgi.dll: ${DXGI}"
           echo "=== Verify OK ==="
 
+      - name: Diagnose DXMT ↔ Wine symbol interface
+        run: |
+          WINEMETAL=$(find "${GITHUB_WORKSPACE}/dxmt-install" -name "winemetal.so" | head -1)
+          echo "=== Undefined symbols winemetal.so needs from Wine/macdrv ==="
+          nm -u "${WINEMETAL}" 2>/dev/null \
+            | awk '/^[[:space:]]+U /{print $2}' \
+            | grep -v '^_' \
+            | sort -u
+          echo ""
+          echo "=== Exported symbols from compiled winemac.drv ==="
+          MACDRV="${GITHUB_WORKSPACE}/workdir/build-wine/dlls/winemac.drv/winemac.drv.so"
+          nm -g "${MACDRV}" 2>/dev/null \
+            | awk '/ T | D /{print $3}' \
+            | grep -v '^_' \
+            | sort -u
+          echo ""
+          echo "=== d3dmetal.c status in wine source ==="
+          ls -la "${GITHUB_WORKSPACE}/workdir/wine-"*/dlls/winemac.drv/d3dmetal.c 2>/dev/null \
+            || echo "  d3dmetal.c does NOT exist in vanilla wine-11.11"
+
       - name: Bundle DXMT into Wine app
         run: |
           APPNAME="Wine Devel ${{ inputs.version }}"
