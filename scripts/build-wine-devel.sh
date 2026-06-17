@@ -148,14 +148,14 @@ COCOA_WIN="${WINE_SRC}/dlls/winemac.drv/cocoa_window.m"
 if grep -q 'd3dmetal_client_surface' "${COCOA_WIN}" 2>/dev/null \
    && ! grep -qE '\*[[:space:]]*d3dmetal_client_surface[[:space:]]*;' "${COCOA_WIN}"; then
   perl -i -0pe \
-    's/(\@implementation WineContentView\s*\{)/$1\n    void *d3dmetal_client_surface;/' \
+    's/(\@implementation WineContentView\s*\{)/$1\n    \@public\n    void *d3dmetal_client_surface;/' \
     "${COCOA_WIN}"
   if grep -qE '\*[[:space:]]*d3dmetal_client_surface' "${COCOA_WIN}"; then
     echo "  ✓ d3dmetal_client_surface injected into WineContentView"
   else
     # fallback: try the @interface block instead
     perl -i -0pe \
-      's/(\@interface WineContentView\s*:[^\{]+\{)/$1\n    void *d3dmetal_client_surface;/' \
+      's/(\@interface WineContentView\s*:[^\{]+\{)/$1\n    \@public\n    void *d3dmetal_client_surface;/' \
       "${COCOA_WIN}"
     grep -qE '\*[[:space:]]*d3dmetal_client_surface' "${COCOA_WIN}" \
       && echo "  ✓ d3dmetal_client_surface injected via @interface" \
