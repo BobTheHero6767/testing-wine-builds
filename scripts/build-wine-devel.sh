@@ -564,7 +564,7 @@ for dylib in "${WINE_LIB}"/*.dylib; do
     [[ "$dep" =~ ^(/usr/local/|/opt/homebrew/) ]] || continue
     depname=$(basename "$dep")
     [[ -f "${WINE_LIB}/${depname}" ]] || continue
-    install_name_tool -change "$dep" "@loader_path/${depname}" "$dylib" 2>/dev/null
+    install_name_tool -change "$dep" "@loader_path/${depname}" "$dylib" 2>/dev/null || true
   done < <(otool -L "$dylib" 2>/dev/null | awk 'NR>1{print $1}')
 done
 echo "  ✓ 2nd pass complete"
