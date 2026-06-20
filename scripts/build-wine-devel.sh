@@ -166,40 +166,29 @@ else
 fi
 
 echo "=== Fix: propagate WineContentView resize to DXMT Metal subview ==="
-# DXMT adds a CAMetalLayer-backed NSView as a subview of WineContentView when
-# it first attaches its Metal surface. That view is sized to the window at
-# attachment time (109x1 — the initial tiny creation size). Neither DXMT nor
-# vanilla Wine updates that subview's frame when the window later resizes to
-# 1470x900, so the Metal layer stays clipped to 109x1 in the top-left corner
-# even though the D3D backbuffer is correctly 1470x900.
-# Fix: inject setFrameSize: into WineContentView to propagate resizes to any
-# CAMetalLayer-backed subview that DXMT added.
 COCOA_WIN="${WINE_SRC}/dlls/winemac.drv/cocoa_window.m"
+# Wine resizes WineContentView via [view setFrame:] not setFrameSize: — must
+# hook setFrame: (the base resize method) to catch all resize events.
+# Also hook addSubview: so autoresizing masks are set when DXMT first adds
+# its Metal view (belt-and-suspenders: one of these will always fire).
 perl -i -0pe '
   s{(\@implementation WineContentView\b)(.*?)(\@end)}{
     my ($cls, $body, $end) = ($1, $2, $3);
-    my $metal_resize = q(
-- (void)setFrameSize:(NSSize)newSize
-{
-    [super setFrameSize:newSize];
-    NSRect newBounds = [self bounds];
-    for (NSView *subview in [self subviews])
-        if ([subview.layer isKindOfClass:NSClassFromString(@"CAMetalLayer")])
-            [subview setFrame:newBounds];
-}
-
-);
-    if ($body !~ /setFrameSize:.*NSSize/) {
-      $cls . $body . $metal_resize . $end;
+    my $metal_code = "    NSRect __mb = [self bounds];\n    for (NSView *__sv in [self subviews])\n        if ([__sv.layer isKindOfClass:NSClassFromString(\@\"CAMetalLayer\")])\n            [__sv setFrame:__mb];\n";
+    unless ($body =~ /- \(void\)setFrame:\(NSRect\)/) {
+      $body = "- (void)setFrame:(NSRect)fr\n{\n    [super setFrame:fr];\n$metal_code}\n\n" . $body;
     } else {
-      $body =~ s{(\[super setFrameSize:[^\]]+\];)}{$1\n    NSRect newBounds = [self bounds];\n    for (NSView *subview in [self subviews])\n        if ([subview.layer isKindOfClass:NSClassFromString(\@"CAMetalLayer")])\n            [subview setFrame:newBounds];};
-      $cls . $body . $end;
+      $body =~ s{(\[super setFrame:[^\]]+\];)}{$1\n$metal_code}g;
     }
+    unless ($body =~ /- \(void\)addSubview:/) {
+      $body = "- (void)addSubview:(NSView *)av\n{\n    [super addSubview:av];\n    if ([av.layer isKindOfClass:NSClassFromString(\@\"CAMetalLayer\")])\n    { [av setAutoresizingMask:NSViewWidthSizable|NSViewHeightSizable]; [av setFrame:[self bounds]]; }\n}\n\n" . $body;
+    }
+    $cls . $body . $end;
   }se
 ' "${COCOA_WIN}"
-grep -q 'CAMetalLayer.*setFrame\|setFrame.*newBounds' "${COCOA_WIN}" \
-  && echo "  ✓ Metal layer resize propagation injected into WineContentView" \
-  || echo "  ✗ FATAL: injection failed — check cocoa_window.m structure"
+grep -q '__mb.*\[self bounds\]\|NSViewWidthSizable' "${COCOA_WIN}" \
+  && echo "  ✓ Metal resize propagation injected (setFrame: + addSubview:)" \
+  || echo "  ✗ FATAL: injection failed"
 
 echo "=== Manual fix for 1001-kernelbase-CW-HACK-19610 (corrupt upstream patch) ==="
 # 1001-kernelbase-CW-HACK-19610.diff has a malformed hunk in riverfog7's repo
